@@ -43,6 +43,7 @@ type proxyServer struct {
 	waitSwitching         chan bool
 	inDataTransfer        *abool.AtomicBool
 	isDataCommandResponse bool
+	eventC                EventChan
 }
 
 type proxyServerConfig struct {
@@ -54,6 +55,7 @@ type proxyServerConfig struct {
 	log            *logger
 	config         *config
 	inDataTransfer *abool.AtomicBool
+	eventC         EventChan
 }
 
 func newProxyServer(conf *proxyServerConfig) (*proxyServer, error) {
@@ -87,6 +89,7 @@ func newProxyServer(conf *proxyServerConfig) (*proxyServer, error) {
 		config:         conf.config,
 		waitSwitching:  make(chan bool),
 		inDataTransfer: conf.inDataTransfer,
+		eventC:         conf.eventC,
 	}
 
 	p.log.debug("new proxy from=%s to=%s", c.LocalAddr(), c.RemoteAddr())
@@ -102,7 +105,8 @@ func (s *proxyServer) commandLineCheck(line string) (string, error) {
 	for {
 		// if line is empty, abort check
 		if len(line) == 0 {
-			return "", fmt.Errorf("aborted : wrong command line")
+			err := fmt.Errorf("aborted : wrong command line")
+			return "", err
 		}
 		b := line[0]
 		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
@@ -136,28 +140,29 @@ func (s *proxyServer) sendToOrigin(line string) error {
 	}
 
 	s.commandLog(line)
-
-	if _, err := s.originWriter.WriteString(line); err != nil {
+	bytes, err := s.originWriter.WriteString(line)
+	if err != nil {
 		s.log.err("send to origin error: %s", err.Error())
 		return err
 	}
 	if err := s.originWriter.Flush(); err != nil {
 		return err
 	}
-
+	s.eventC.Send(Event{name: DataTransferEventType, payload: DataTransferEvent{SrcAddr: s.origin.LocalAddr().String(), DstAddr: s.origin.RemoteAddr().String(), Bytes: bytes}})
 	return nil
 }
 
 func (s *proxyServer) sendToClient(line string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
-	if _, err := s.clientWriter.WriteString(line + "\r\n"); err != nil {
+	bytes, err := s.clientWriter.WriteString(line + "\r\n")
+	if err != nil {
 		return err
 	}
 	if err := s.clientWriter.Flush(); err != nil {
 		return err
 	}
+	s.eventC.Send(Event{name: DataTransferEventType, payload: DataTransferEvent{SrcAddr: s.origin.LocalAddr().String(), DstAddr: s.origin.RemoteAddr().String(), Bytes: bytes}})
 
 	s.log.debug("send to client: %s", line)
 	return nil
@@ -181,6 +186,7 @@ func (s *proxyServer) unsuspend() {
 func (s *proxyServer) Close() error {
 	if s.origin != nil {
 		if err := s.origin.Close(); err != nil {
+			s.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: s.origin.RemoteAddr().String(), ErrorMessage: err.Error()}})
 			return err
 		}
 	}
@@ -379,6 +385,7 @@ func (s *proxyServer) switchOrigin(clientAddr string, originAddr string, previou
 	// change connection and reset reader and writer buffer
 	s.origin, err = net.DialTimeout("tcp", originAddr, time.Duration(connectionTimeout)*time.Second)
 	if err != nil {
+		s.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: s.origin.RemoteAddr().String(), ErrorMessage: err.Error()}})
 		return err
 	}
 	s.originReader = bufio.NewReader(s.origin)
@@ -388,6 +395,7 @@ func (s *proxyServer) switchOrigin(clientAddr string, originAddr string, previou
 	if s.config.ProxyProtocol {
 		s.log.debug("send proxy protocol to origin")
 		if err := s.sendProxyHeader(clientAddr, originAddr); err != nil {
+			s.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: s.origin.RemoteAddr().String(), ErrorMessage: err.Error()}})
 			return err
 		}
 	}
@@ -395,6 +403,7 @@ func (s *proxyServer) switchOrigin(clientAddr string, originAddr string, previou
 	// Read welcome message from ftp connection
 	res, err := s.originReader.ReadString('\n')
 	if err != nil {
+		s.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: s.origin.RemoteAddr().String(), ErrorMessage: err.Error()}})
 		return errors.New("cannot connect to new origin server")
 	}
 
@@ -410,6 +419,7 @@ func (s *proxyServer) switchOrigin(clientAddr string, originAddr string, previou
 
 	// If client connect with TLS connection, make TLS connection to origin ftp server too.
 	if err := s.sendTLSCommand(previousTLSCommands); err != nil {
+		s.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: s.origin.RemoteAddr().String(), ErrorMessage: err.Error()}})
 		return err
 	}
 
@@ -560,6 +570,7 @@ loop:
 		case b := <-read:
 			if err := s.sendToClient(strings.TrimRight(b, "\r\n")); err != nil {
 				if !strings.Contains(err.Error(), alreadyClosedMsg) {
+					s.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: s.origin.RemoteAddr().String(), ErrorMessage: err.Error()}})
 					s.log.err("error on write response to client: %s, err: %s", strings.TrimSuffix(b, "\r\n"), err.Error())
 				}
 			}

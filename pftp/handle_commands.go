@@ -230,17 +230,19 @@ func (c *clientHandler) handleTransfer() *result {
 	}
 
 	if !c.proxy.isDataHandlerAvailable() {
-		return &result{
+		r := &result{
 			code: 425,
 			msg:  "Can't open data connection",
 		}
+		return r
 	}
 
 	if c.proxy.isDataTransferStarted() {
-		return &result{
+		r := &result{
 			code: 450,
 			msg:  fmt.Sprintf("%s: data transfer in progress", c.command),
 		}
+		return r
 	}
 
 	// start data transfer by direction
@@ -265,19 +267,21 @@ func (c *clientHandler) handleTransfer() *result {
 func (c *clientHandler) handlePROXY() *result {
 	params := strings.SplitN(strings.Trim(c.line, "\r\n"), " ", 6)
 	if len(params) != 6 {
-		return &result{
+		r := &result{
 			code: 500,
 			msg:  "Proxy header parse error",
 			err:  errors.New("wrong proxy header parameters"),
 		}
+		return r
 	}
 
 	if net.ParseIP(params[2]) == nil || net.ParseIP(params[3]) == nil {
-		return &result{
+		r := &result{
 			code: 500,
 			msg:  "Proxy header parse error",
 			err:  errors.New("wrong source ip address"),
 		}
+		return r
 	}
 
 	c.srcIP = params[2] + ":" + params[4]
@@ -302,10 +306,11 @@ func (c *clientHandler) handleDATA() *result {
 		// Return 450 response code to client without create
 		// & attach new data handler when data transfer in progress.
 		if c.proxy.isDataTransferStarted() {
-			return &result{
+			r := &result{
 				code: 450,
 				msg:  fmt.Sprintf("%s: data transfer in progress", c.command),
 			}
+			return r
 		}
 
 		// make new listener and store listener port
@@ -318,14 +323,16 @@ func (c *clientHandler) handleDATA() *result {
 			c.tlsDatas,
 			c.transferInTLS,
 			c.inDataTransfer,
+			c.eventC,
 		)
 		if err != nil {
-			return &result{
+			r := &result{
 				code: 421,
 				msg:  "cannot create data channel socket",
 				err:  err,
 				log:  c.log,
 			}
+			return r
 		}
 
 		c.proxy.SetDataHandler(dataHandler)
@@ -369,10 +376,11 @@ func (c *clientHandler) handleDATA() *result {
 		}
 
 		if !c.proxy.isDataHandlerAvailable() {
-			return &result{
+			r := &result{
 				code: 425,
 				msg:  "Can't open data connection",
 			}
+			return r
 		}
 
 		// if origin connect mode is PORT or CLIENT(with client use some kind of active mode)

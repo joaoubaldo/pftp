@@ -32,6 +32,7 @@ type dataHandler struct {
 	inDataTransfer     *abool.AtomicBool
 	closed             bool
 	mutex              *sync.Mutex
+	eventC             EventChan
 }
 
 type connector struct {
@@ -49,7 +50,7 @@ type connector struct {
 }
 
 // Make listener for data connection
-func newDataHandler(config *config, log *logger, clientConn net.Conn, originConn net.Conn, mode string, tlsDataSet *tlsDataSet, transferOverTLS *abool.AtomicBool, inDataTransfer *abool.AtomicBool) (*dataHandler, error) {
+func newDataHandler(config *config, log *logger, clientConn net.Conn, originConn net.Conn, mode string, tlsDataSet *tlsDataSet, transferOverTLS *abool.AtomicBool, inDataTransfer *abool.AtomicBool, eventC EventChan) (*dataHandler, error) {
 	var err error
 
 	d := &dataHandler{
@@ -76,6 +77,7 @@ func newDataHandler(config *config, log *logger, clientConn net.Conn, originConn
 		needTLSForTransfer: transferOverTLS,
 		closed:             false,
 		mutex:              &sync.Mutex{},
+		eventC:             eventC,
 	}
 
 	if d.originConn.communicationConn != nil {
@@ -564,10 +566,14 @@ func (d *dataHandler) copyPackets(dst net.Conn, src net.Conn, timeout int) error
 		n, err := src.Read(buff)
 		if n > 0 {
 			// stop coping when failed to write dst socket
-			if _, err := dst.Write(buff[:n]); err != nil {
+			d.eventC.Send(Event{name: DataTransferEventType, payload: DataTransferEvent{SrcAddr: src.RemoteAddr().String(), DstAddr: dst.LocalAddr().String(), Bytes: n}})
+			bytes, err := dst.Write(buff[:n])
+			if err != nil {
 				dst.Close()
 				break
 			}
+			d.eventC.Send(Event{name: DataTransferEventType, payload: DataTransferEvent{SrcAddr: dst.LocalAddr().String(), DstAddr: dst.RemoteAddr().String(), Bytes: bytes}})
+
 			// increase data transfer timeout
 			src.SetDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
 		}

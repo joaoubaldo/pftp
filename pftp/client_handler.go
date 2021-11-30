@@ -65,9 +65,10 @@ type clientHandler struct {
 	srcIP               string
 	previousTLSCommands []string
 	inDataTransfer      *abool.AtomicBool
+	eventC              EventChan
 }
 
-func newClientHandler(connection net.Conn, c *config, sharedTLSData *tlsData, m middleware, id uint64, currentConnection *int32) *clientHandler {
+func newClientHandler(connection net.Conn, c *config, sharedTLSData *tlsData, m middleware, id uint64, currentConnection *int32, eventC EventChan) *clientHandler {
 	p := &clientHandler{
 		id:                id,
 		conn:              connection,
@@ -83,11 +84,13 @@ func newClientHandler(connection net.Conn, c *config, sharedTLSData *tlsData, m 
 		log:               &logger{fromip: connection.RemoteAddr().String(), user: "-", id: id},
 		srcIP:             connection.RemoteAddr().String(),
 		inDataTransfer:    abool.New(),
+		eventC:            eventC,
 	}
 
 	// increase current connection count
 	p.connCounts = atomic.AddInt32(p.currentConnection, 1)
 	p.log.info("FTP Client connected. clientIP: %s. current connection count: %d", p.conn.RemoteAddr(), p.connCounts)
+	p.eventC.Send(Event{name: ClientConnectEventType, payload: ClientConnectEvent{RemoteAddr: p.conn.RemoteAddr().String(), ClientCount: p.connCounts}})
 
 	// is masquerade IP not setted, set local IP of client connection
 	if len(p.config.MasqueradeIP) == 0 {
@@ -127,7 +130,7 @@ func (c *clientHandler) handleCommands() error {
 	defer func() {
 		// decrease current connection count
 		c.log.info("FTP Client disconnect. clientIP: %s. current connection count: %d", c.conn.RemoteAddr(), atomic.AddInt32(c.currentConnection, -1))
-
+		c.eventC.Send(Event{name: ClientDisconnectEventType, payload: ClientDisconnectEvent{RemoteAddr: c.conn.RemoteAddr().String(), ClientCount: *c.currentConnection}})
 		// close each connection again
 		connectionCloser(c, c.log)
 		if c.proxy != nil {
@@ -144,8 +147,10 @@ func (c *clientHandler) handleCommands() error {
 			err:  err,
 			log:  c.log,
 		}
+		c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: r.msg}})
 		if err := r.Response(c); err != nil {
-			c.log.err("cannot send response to client")
+			msg := "cannot send response to client"
+			c.log.err(msg)
 		}
 
 		return err
@@ -155,6 +160,7 @@ func (c *clientHandler) handleCommands() error {
 
 	err := c.connectProxy()
 	if err != nil {
+		c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: err.Error()}})
 		return err
 	}
 
@@ -213,10 +219,14 @@ func (c *clientHandler) getResponseFromOrigin() error {
 			if !<-c.proxy.waitSwitching {
 				err = fmt.Errorf("switch origin to %s is failed", c.context.RemoteAddr)
 				c.log.err(err.Error())
-
+				c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: err.Error()}})
 				break
 			}
 		}
+	}
+
+	if err != nil {
+		c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: err.Error()}})
 	}
 
 	return err
@@ -246,6 +256,7 @@ func (c *clientHandler) readClientCommands() error {
 
 		line, err := c.reader.ReadString('\n')
 		if err != nil {
+			c.eventC.Send(Event{name: DataTransferEventType, payload: DataTransferEvent{SrcAddr: c.conn.RemoteAddr().String(), DstAddr: c.conn.LocalAddr().String(), Bytes: len(line)}})
 			lastError = err
 			if err == io.EOF {
 				c.log.debug("EOF from client connection")
@@ -292,6 +303,7 @@ func (c *clientHandler) readClientCommands() error {
 			break
 		} else {
 			commandResponse := c.handleCommand(line)
+			c.eventC.Send(Event{name: DataTransferEventType, payload: DataTransferEvent{SrcAddr: c.conn.RemoteAddr().String(), DstAddr: c.conn.LocalAddr().String(), Bytes: len(line)}})
 			if commandResponse != nil {
 				if err = commandResponse.Response(c); err != nil {
 					lastError = err
@@ -299,6 +311,9 @@ func (c *clientHandler) readClientCommands() error {
 				}
 			}
 		}
+	}
+	if lastError != nil {
+		c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: lastError.Error()}})
 	}
 
 	return lastError
@@ -309,9 +324,11 @@ func (c *clientHandler) writeLine(line string) error {
 	defer c.mutex.Unlock()
 
 	if _, err := c.writer.WriteString(line + "\r\n"); err != nil {
+		c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: err.Error()}})
 		return err
 	}
 	if err := c.writer.Flush(); err != nil {
+		c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: err.Error()}})
 		return err
 	}
 
@@ -328,10 +345,12 @@ func (c *clientHandler) handleCommand(line string) (r *result) {
 	c.parseLine(line)
 	defer func() {
 		if r := recover(); r != nil {
+			msg := fmt.Sprintf("Internal error: %s", r)
 			r = &result{
 				code: 500,
-				msg:  fmt.Sprintf("Internal error: %s", r),
+				msg:  msg,
 			}
+			c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: msg}})
 		}
 	}()
 
@@ -339,13 +358,15 @@ func (c *clientHandler) handleCommand(line string) (r *result) {
 
 	if c.middleware[c.command] != nil {
 		if err := c.middleware[c.command](c.context, c.param); err != nil {
-			return &result{
+			r = &result{
 				code: 500,
 				msg:  fmt.Sprintf("Internal error: %s", err),
 			}
+			c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: r.msg}})
+			return r
 		}
 	}
-
+	c.eventC.Send(Event{name: ClientCommandEventType, payload: ClientCommandEvent{RemoteAddr: c.conn.RemoteAddr().String(), Command: c.command}})
 	cmd := handlers[c.command]
 	if cmd != nil {
 		if cmd.suspend {
@@ -354,14 +375,19 @@ func (c *clientHandler) handleCommand(line string) (r *result) {
 		}
 		res := cmd.f(c)
 		if res != nil {
+			if res.err != nil {
+				c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: res.err.Error()}})
+			}
 			return res
 		}
 	} else {
 		if err := c.proxy.sendToOrigin(line); err != nil {
-			return &result{
+			r = &result{
 				code: 500,
 				msg:  fmt.Sprintf("Internal error: %s", err),
 			}
+			c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: r.msg}})
+			return r
 		}
 	}
 
@@ -385,8 +411,10 @@ func (c *clientHandler) connectProxy() error {
 				log:            c.log,
 				config:         c.config,
 				inDataTransfer: c.inDataTransfer,
+				eventC:         c.eventC,
 			})
 		if err != nil {
+			c.eventC.Send(Event{name: ErrorEventType, payload: ErrorEvent{RemoteAddr: c.conn.RemoteAddr().String(), ErrorMessage: err.Error()}})
 			return err
 		}
 		c.proxy = p
