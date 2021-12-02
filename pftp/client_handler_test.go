@@ -22,6 +22,7 @@ func Test_clientHandler_handleCommands(t *testing.T) {
 
 	type fields struct {
 		config *config
+		eventC EventChan
 	}
 
 	tests := []struct {
@@ -70,6 +71,7 @@ func Test_clientHandler_handleCommands(t *testing.T) {
 				nil,
 				1,
 				&cn,
+				tt.fields.eventC,
 			)
 
 			if tt.hook != nil {
@@ -98,6 +100,7 @@ func Test_clientHandler_handleCommand(t *testing.T) {
 
 	type fields struct {
 		config *config
+		eventC EventChan
 	}
 	type args struct {
 		line string
@@ -198,6 +201,7 @@ func Test_clientHandler_handleCommand(t *testing.T) {
 				nil,
 				1,
 				&cn,
+				tt.fields.eventC,
 			)
 
 			got := clientHandler.handleCommand(tt.args.line)
@@ -224,6 +228,7 @@ func Test_clientHandler_TLS_error_type_bug(t *testing.T) {
 
 	type fields struct {
 		config *config
+		eventC EventChan
 	}
 
 	tests := []struct {
@@ -272,6 +277,7 @@ func Test_clientHandler_TLS_error_type_bug(t *testing.T) {
 					nil,
 					1,
 					&cn,
+					tt.fields.eventC,
 				)
 
 				err := clientHandler.handleCommands()
@@ -352,6 +358,7 @@ func Test_clientHandler_TLS_Session_Resumption(t *testing.T) {
 
 	type fields struct {
 		config *config
+		eventC EventChan
 	}
 
 	tests := []struct {
@@ -374,6 +381,7 @@ func Test_clientHandler_TLS_Session_Resumption(t *testing.T) {
 						Key:  "../tls/server.key",
 					},
 				},
+				eventC: nil,
 			},
 			hook:    func() { time.Sleep(2 * time.Second) },
 			wantErr: false,
@@ -400,6 +408,7 @@ func Test_clientHandler_TLS_Session_Resumption(t *testing.T) {
 					nil,
 					1,
 					&cn,
+					tt.fields.eventC,
 				)
 
 				err := clientHandler.handleCommands()
@@ -466,6 +475,7 @@ func Test_clientHandler_TLS_Session_Resumption(t *testing.T) {
 					nil,
 					1,
 					&cn,
+					tt.fields.eventC,
 				)
 
 				err := clientHandler.handleCommands()

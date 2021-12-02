@@ -25,6 +25,7 @@ type FtpServer struct {
 	serverTLSData *tlsData
 	middleware    middleware
 	shutdown      bool
+	eventC        EventChan
 }
 
 // NewFtpServer load config and create new ftp server struct
@@ -51,6 +52,10 @@ func NewFtpServer(confFile string) (*FtpServer, error) {
 	}
 
 	return server, nil
+}
+
+func (server *FtpServer) SetEventC(eventC EventChan) {
+	server.eventC = eventC
 }
 
 // Use set middleware function
@@ -108,7 +113,7 @@ func (server *FtpServer) serve() error {
 
 		server.clientCounter++
 
-		c := newClientHandler(conn, server.config, server.serverTLSData, server.middleware, server.clientCounter, &currentConnection)
+		c := newClientHandler(conn, server.config, server.serverTLSData, server.middleware, server.clientCounter, &currentConnection, server.eventC)
 		eg.Go(func() error {
 			err := c.handleCommands()
 			logrus.Info("handle command end runtime goroutine count: ", runtime.NumGoroutine())
@@ -160,6 +165,9 @@ L:
 }
 
 func (server *FtpServer) stop() error {
+	if server.eventC != nil {
+		close(server.eventC)
+	}
 	server.shutdown = true
 	if server.listener != nil {
 		if err := server.listener.Close(); err != nil {
